@@ -51,7 +51,7 @@ export default async function InternRecordPage({
         </div>
       )}
 
-      <RecordView record={record} />
+      <RecordView record={record} hideFields={["Uploaded To Avifauna"]} />
 
       {alreadySubmitted ? (
         <div className="rounded border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">

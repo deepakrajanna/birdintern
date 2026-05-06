@@ -62,9 +62,17 @@ function renderValue(name: string, value: string) {
   return <span className="select-all">{value}</span>;
 }
 
-export default function RecordView({ record }: { record: BirdRecord }) {
+export default function RecordView({
+  record,
+  hideFields = [],
+}: {
+  record: BirdRecord;
+  /** Field names to hide in addition to the workflow internals. */
+  hideFields?: string[];
+}) {
+  const extraHidden = new Set(hideFields);
   const entries = Object.entries(record.fields).filter(
-    ([k, v]) => !HIDDEN_FIELDS.has(k) && v !== ""
+    ([k, v]) => !HIDDEN_FIELDS.has(k) && !extraHidden.has(k) && v !== ""
   );
   return (
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">

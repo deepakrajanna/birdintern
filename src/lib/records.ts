@@ -1,6 +1,7 @@
 import { readTab, headerIndex, updateRowCells, TAB } from "./sheets";
 import { withClaimLock } from "./lock";
 import { logAudit, listAudit } from "./audit";
+import { listUsers } from "./users";
 import type {
   BirdRecord,
   InternStatus,
@@ -311,4 +312,74 @@ export async function computeInternStats(
   ).length;
 
   return { workedOn, approved };
+}
+
+// --- Admin dashboard ---------------------------------------------------------
+
+export interface OverallStats {
+  total: number;
+  unassigned: number;
+  in_progress: number; // claimed but not yet submitted
+  awaiting_supervisor: number;
+  blocked: number;
+  approved: number;
+}
+
+export async function computeOverallStats(): Promise<OverallStats> {
+  const all = await loadAllRecords();
+  return {
+    total: all.length,
+    unassigned: all.filter((r) => r.state === "unassigned").length,
+    in_progress: all.filter((r) => r.state === "claimed").length,
+    awaiting_supervisor: all.filter(
+      (r) => r.state === "submitted_to_supervisor"
+    ).length,
+    blocked: all.filter((r) => r.state === "blocked_admin_queue").length,
+    approved: all.filter((r) => r.state === "approved").length,
+  };
+}
+
+export interface InternProgress {
+  email: string;
+  name: string;
+  in_progress: number;
+  awaiting_review: number;
+  approved: number;
+  blocked: number;
+  total_submissions: number; // lifetime submit events from audit log
+}
+
+export async function computeInternProgress(): Promise<InternProgress[]> {
+  const [all, users, audit] = await Promise.all([
+    loadAllRecords(),
+    listUsers(),
+    listAudit(),
+  ]);
+  const interns = users.filter((u) => u.role === "intern" && u.active);
+
+  const rows = interns.map<InternProgress>((u) => {
+    const mine = all.filter((r) => r.assigned_to_email === u.email);
+    return {
+      email: u.email,
+      name: u.name || u.email,
+      in_progress: mine.filter((r) => r.state === "claimed").length,
+      awaiting_review: mine.filter(
+        (r) => r.state === "submitted_to_supervisor"
+      ).length,
+      approved: mine.filter((r) => r.state === "approved").length,
+      blocked: mine.filter((r) => r.state === "blocked_admin_queue").length,
+      total_submissions: audit.filter(
+        (e) =>
+          e.actor_email === u.email && e.action.startsWith("submit:")
+      ).length,
+    };
+  });
+
+  // Most active interns first; tie-break alphabetically.
+  rows.sort(
+    (a, b) =>
+      b.total_submissions - a.total_submissions ||
+      a.name.localeCompare(b.name)
+  );
+  return rows;
 }

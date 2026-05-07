@@ -1,13 +1,23 @@
 import type { BirdRecord } from "@/lib/types";
 import { formatLatLong, parseCoordinate } from "@/lib/coords";
 
-// Field definitions used by the two tables. Each entry has a `keys` list
-// of header names to try in order — useful when the sheet might use a
-// renamed column (e.g. "Latitude" vs the CSV's typo'd "Lattitude").
+// Field definitions used by the two tables.
+//   - `keys` is the list of header names to try in order (handles minor
+//     header variations across sheets).
+//   - `combine: true` pulls every non-empty value from `keys` into one row,
+//     stacked vertically (used for "Remarks").
+//   - `hideIfEmpty: true` drops the row when no value is found.
+//   - `emptyFallback` is the text shown when no value is found (default "—").
+//     Ignored if hideIfEmpty is set.
 interface FieldDef {
   label: string;
   keys: string[];
+  combine?: boolean;
+  hideIfEmpty?: boolean;
+  emptyFallback?: string;
 }
+
+const PLACEHOLDER = "—";
 
 const RINGING_FIELDS: FieldDef[] = [
   { label: "Ring number", keys: ["Ring number", "Ring_concat"] },
@@ -24,35 +34,35 @@ const RINGING_FIELDS: FieldDef[] = [
 const RESIGHTING_FIELDS: FieldDef[] = [
   { label: "ID", keys: ["ID"] },
   { label: "Ring number", keys: ["Ring number", "Ring_concat"] },
-  {
-    label: "Resighting Scientific Name",
-    keys: ["Resighting Scientific Name"],
-  },
+  // Renamed from "Resighting Scientific Name"; lookup key unchanged.
+  { label: "Scientific name", keys: ["Resighting Scientific Name"] },
   { label: "Sex", keys: ["Sex"] },
+  { label: "Date Of Ringing", keys: ["Date Of Ringing"] },
+  { label: "Place Of Ringing", keys: ["Place Of Ringing"] },
+  { label: "Ringer", keys: ["Ringer"] },
   { label: "Latitude", keys: ["Latitude", "Lattitude"] },
   { label: "Longitude", keys: ["Longitude"] },
-  { label: "Date Of Ringing", keys: ["Date Of Ringing"] },
-  { label: "Date Of Recovery", keys: ["Date Of Recovery"] },
-  { label: "Place Of Ringing", keys: ["Place Of Ringing"] },
   { label: "Place Of Recovery", keys: ["Place Of Recovery"] },
-  // Synthetic — computed from Latitude + Longitude. Position in the array
-  // is the position in the rendered table.
+  // Synthetic — computed from Latitude + Longitude.
   { label: "Coordinates (decimal)", keys: [] },
-  { label: "Ringer", keys: ["Ringer"] },
-  { label: "Resighting Page Link", keys: ["Resighting Page Link"] },
+  { label: "Date Of Recovery", keys: ["Date Of Recovery"] },
+  {
+    label: "Reported By",
+    keys: ["Reported By"],
+    emptyFallback: "Unspecified",
+  },
+  // Synthetic — formatted block: "Reported by: …" + "Source: …".
+  { label: "Remarks", keys: [] },
 ];
 
 const COORDS_LABEL = "Coordinates (decimal)";
+const REMARKS_LABEL = "Remarks";
 
 function isUrl(s: string): boolean {
   return /^https?:\/\//i.test(s.trim());
 }
 
-function isLinkField(name: string): boolean {
-  return /\blink\b/i.test(name);
-}
-
-function lookupValue(record: BirdRecord, keys: string[]): string {
+function lookupFirstValue(record: BirdRecord, keys: string[]): string {
   for (const k of keys) {
     const v = record.fields[k];
     if (v !== undefined && v !== "") return v;
@@ -60,12 +70,21 @@ function lookupValue(record: BirdRecord, keys: string[]): string {
   return "";
 }
 
+function lookupAllValues(record: BirdRecord, keys: string[]): string[] {
+  const out: string[] = [];
+  for (const k of keys) {
+    const v = record.fields[k];
+    if (v !== undefined && v !== "") out.push(v);
+  }
+  return out;
+}
+
 function shouldHighlight(
   label: string,
   value: string,
   record: BirdRecord
 ): boolean {
-  if (label === "Resighting Scientific Name") {
+  if (label === "Scientific name") {
     const a = value.trim().toLowerCase();
     const b = (record.fields["Ringing Species"] || "").trim().toLowerCase();
     return !!a && !!b && a !== b;
@@ -73,8 +92,11 @@ function shouldHighlight(
   return false;
 }
 
-function renderValue(label: string, value: string) {
-  if (isLinkField(label) && isUrl(value)) {
+/**
+ * Render a single value: clickable link if it's a URL, plain text otherwise.
+ */
+function renderSingleValue(value: string) {
+  if (isUrl(value)) {
     return (
       <a
         href={value}
@@ -86,14 +108,42 @@ function renderValue(label: string, value: string) {
       </a>
     );
   }
-  return <span className="select-all">{value}</span>;
+  return (
+    <span className="select-all whitespace-pre-wrap">{value}</span>
+  );
 }
 
 interface ResolvedRow {
   label: string;
-  value: string;
+  values: string[]; // 1+ values; multiple are rendered stacked
   isCoords: boolean;
   highlight: boolean;
+  /** When set, replaces the default cell rendering. */
+  customCell?: React.ReactNode;
+}
+
+/** Builds the "Remarks" cell: Reported by + Source, stacked. */
+function buildRemarksCell(record: BirdRecord): React.ReactNode {
+  const reportedByRaw = lookupFirstValue(record, ["Reported By"]);
+  const sourceRaw = lookupFirstValue(record, ["Resighting Page Link"]);
+  const reportedBy = reportedByRaw || "Unspecified";
+
+  return (
+    <div className="space-y-1">
+      <div>
+        <span className="font-medium text-slate-700">Reported by: </span>
+        <span className="select-all">{reportedBy}</span>
+      </div>
+      <div>
+        <span className="font-medium text-slate-700">Source: </span>
+        {sourceRaw ? (
+          renderSingleValue(sourceRaw)
+        ) : (
+          <span className="text-slate-400">{PLACEHOLDER}</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function resolveRows(
@@ -101,19 +151,61 @@ function resolveRows(
   record: BirdRecord,
   combined: string | null
 ): ResolvedRow[] {
-  return defs.flatMap((f) => {
+  return defs.flatMap<ResolvedRow>((f) => {
     if (f.label === COORDS_LABEL) {
+      // Synthetic field — drop silently when we can't compute it.
       if (!combined) return [];
       return [
-        { label: COORDS_LABEL, value: combined, isCoords: true, highlight: false },
+        {
+          label: COORDS_LABEL,
+          values: [combined],
+          isCoords: true,
+          highlight: false,
+        },
       ];
     }
-    const v = lookupValue(record, f.keys);
-    if (!v) return [];
+    if (f.label === REMARKS_LABEL) {
+      return [
+        {
+          label: REMARKS_LABEL,
+          values: [],
+          isCoords: false,
+          highlight: false,
+          customCell: buildRemarksCell(record),
+        },
+      ];
+    }
+    if (f.combine) {
+      const values = lookupAllValues(record, f.keys);
+      if (values.length === 0) {
+        if (f.hideIfEmpty) return [];
+        return [
+          {
+            label: f.label,
+            values: [f.emptyFallback ?? PLACEHOLDER],
+            isCoords: false,
+            highlight: false,
+          },
+        ];
+      }
+      return [{ label: f.label, values, isCoords: false, highlight: false }];
+    }
+    const v = lookupFirstValue(record, f.keys);
+    if (!v) {
+      if (f.hideIfEmpty) return [];
+      return [
+        {
+          label: f.label,
+          values: [f.emptyFallback ?? PLACEHOLDER],
+          isCoords: false,
+          highlight: false,
+        },
+      ];
+    }
     return [
       {
         label: f.label,
-        value: v,
+        values: [v],
         isCoords: false,
         highlight: shouldHighlight(f.label, v, record),
       },
@@ -141,8 +233,8 @@ function FieldTable({ title, rows }: { title: string; rows: ResolvedRow[] }) {
                 <td
                   className={
                     r.isCoords
-                      ? "w-1/3 bg-emerald-100 px-4 py-2 font-medium text-emerald-900"
-                      : "w-1/3 bg-slate-50 px-4 py-2 font-medium text-slate-700"
+                      ? "w-1/3 bg-emerald-100 px-4 py-2 align-top font-medium text-emerald-900"
+                      : "w-1/3 bg-slate-50 px-4 py-2 align-top font-medium text-slate-700"
                   }
                 >
                   {r.label}
@@ -156,7 +248,12 @@ function FieldTable({ title, rows }: { title: string; rows: ResolvedRow[] }) {
                         : "px-4 py-2 text-slate-900"
                   }
                 >
-                  {renderValue(r.label, r.value)}
+                  {r.customCell ??
+                    r.values.map((v, i) => (
+                      <div key={i} className={i > 0 ? "mt-2" : ""}>
+                        {renderSingleValue(v)}
+                      </div>
+                    ))}
                 </td>
               </tr>
             ))}
@@ -168,8 +265,8 @@ function FieldTable({ title, rows }: { title: string; rows: ResolvedRow[] }) {
 }
 
 function MapEmbed({ lat, lng }: { lat: number; lng: number }) {
-  // Using the unauthenticated Google Maps embed URL — no API key required.
-  // q=lat,lng drops a marker; z controls zoom (lower = wider view).
+  // Unauthenticated Google Maps embed — no API key required.
+  // q=lat,lng drops a marker; z controls zoom; hl=en forces English labels.
   const src = `https://maps.google.com/maps?q=${encodeURIComponent(
     `${lat},${lng}`
   )}&z=8&hl=en&output=embed`;
@@ -200,8 +297,6 @@ export default function RecordView({
   const filterDefs = (defs: FieldDef[]) =>
     defs.filter((f) => !hidden.has(f.label));
 
-  // Parse coordinates once and share with both the table (for the synthetic
-  // row) and the map embed.
   const latRaw =
     record.fields["Lattitude"] ||
     record.fields["Latitude"] ||
